@@ -1,0 +1,258 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+
+<title>TEST of simple GPU/CPU system</title>
+
+</head>
+<body>
+<input type="button" value="Using CPU" onclick="return change(this);" />
+
+<script src="gpu.js"></script>
+<script src="declr.js"></script>
+<script src="scene.js"></script>
+<!-- <script src="raytracer.js"></script> -->
+
+<div id="fps"></div>
+
+<script>
+
+   var selection = 0;
+
+   function change( el ) {
+      if ( el.value === "Using CPU" ) {
+         selection = 1;
+         el.value = "Using GPU";
+      } else {
+         selection = 0;
+         el.value = "Using CPU";
+      }
+   }
+
+   var ray = {
+      point: {
+         x: camera[0],
+         y: camera[1],
+         z: camera[2]
+      }
+   }
+
+   var width = 800;
+   var height = 600;
+   var fovRadians = Math.PI * (camera[6]/2)/180;
+   var scale = Math.tan(fovRadians) * 4;
+   var heightWidthRatio = height/width;
+
+   var gpu = new GPU();
+
+   function sqr(x) {
+      return x*x;
+   }
+   function dist(x1,y1,x2,y2) {
+      return Math.sqrt( sqr(x2-x1)+sqr(y2-y1) );
+   }
+   function dotproduct(x1,x2,y1,y2,z1,z2) {
+      return x1 * x2 + y1 * y2 + z1 * z2;
+   }
+
+   gpu.addFunction(sqr);
+   gpu.addFunction(dist);
+   gpu.addFunction(dotproduct);
+
+   function doit(mode) {
+      var opt = {
+         dimensions: [800,600],
+         debug: true,
+         graphical: true,
+         constants: { OBJCOUNT: objects[0],     
+                         EMPTY: ObjTyp.EMPTY,    SPHERE: ObjTyp.SPHERE,   CUBOID: ObjTyp.CUBOID, 
+                      CYLINDER: ObjTyp.CYLINDER,   CONE: ObjTyp.CONE,   TRIANGLE: ObjTyp.TRIANGLE,
+                     LIGHTCOUNT: lights[0]},
+         mode: mode
+      };
+
+      var visualise = gpu.createKernel(function(Camera,Lights,Objects,width,height,fovRadians,scale,heightWidthRatio) {         
+         var centerX = this.thread.x + 0.5;  // center of pixel
+         var centerY = this.thread.y + 0.5;  // center of pixel
+         var dirX = (centerX/width) * 2 - 1;
+         dirX = dirX * scale * heightWidthRatio;
+         var dirY = (1 - 2 * centerY/height);
+         var dirZ = -1;
+         var length = Math.sqrt(sqr(0-dirX)+sqr(0-dirY)+sqr(0-dirZ));
+         var unitDX = dirX/length;
+         var unitDY = dirY/length;
+         var unitDZ = dirZ/length;
+         var idx = 1;                                     // index for looking through all the objects
+         var nextidx = 1; 
+         this.color(0.95,0.95,0.95);
+         var a, b, c, discr, t1, t2, tmin=1000000, ttmp, isSphere=0, isTriangle=0;
+         for (i=0; i<this.constants.OBJCOUNT; i++ ) {     // Look at all object records
+            idx = nextidx;                               // Skip to next record
+            nextidx = Objects[idx+1]+idx;                // Pre-compute the beginning of the next record
+            if (Objects[idx] == this.constants.SPHERE) { // i.e. if it is a SPHERE...
+               // ray-sphere intersection Ray + tDir
+               var sphereX = 2*(Objects[idx+9]/width)-1;
+               var sphereY = scale*((1-(2*Objects[idx+10]))/height);
+               var sphereZ = Objects[idx+11];
+               a = 1;   // normalised vector gives a magnitude of 1
+               b = 2*(dotproduct(unitDX,0-sphereX,unitDY,0-sphereY,unitDZ,0-sphereZ));
+               c = sqr(0-sphereX) + sqr(0-sphereY) + sqr(0-sphereZ) - sqr(Objects[idx+12]);
+               discr = sqr(b) - 4*a*c;       // checking discriminant if <=0 it means that the ray intersects the sphere
+               if(discr>=0){      
+                  t1 = ((0-b)+Math.sqrt(discr))/2;
+                  t2 = ((0-b)-Math.sqrt(discr))/2;
+                  if (t1>=0 && t2>=0) ttmp = Math.min(t1,t2);
+                  else if(t1>0) ttmp = t1;
+                  else if(t2>0) ttmp = t2;
+                  if(ttmp<tmin){
+                     tmin = ttmp;
+                     isSphere = idx;
+                  }
+               }
+            }
+            // if (Objects[idx] === this.constants.TRIANGLE) {
+            //    var TriAX = 2*(Objects[idx+9]/width)-1;
+            //    var TriAY = scale*((1-(2*Objects[idx+10]))/height);
+            //    var TriAZ = Objects[idx+11]; 
+            //    var TriBX = 2*(Objects[idx+12]/width)-1;
+            //    var TriBY = scale*((1-(2*Objects[idx+13]))/height);
+            //    var TriBZ = Objects[idx+14]; 
+            //    var TriCX = 2*(Objects[idx+15]/width)-1;
+            //    var TriCY = scale*((1-(2*Objects[idx+16]))/height);
+            //    var TriCZ = Objects[idx+17]; 
+            //    var edgeAX = TriBX - TriAX;
+            //    var edgeAY = TriBY - TriAY;
+            //    var edgeAZ = TriBZ - TriAZ;
+            //    var edgeBX = TriCX - TriAX;
+            //    var edgeBY = TriCY - TriAY;
+            //    var edgeBZ = TriCZ - TriAZ;
+            //    var edgeCX = edgeAY * edgeBZ - edgeAZ * edgeBY;
+            //    var edgeCY = edgeAZ * edgeBX - edgeAX * edgeBZ;
+            //    var edgeCZ = edgeAX * edgeBY - edgeAY * edgeBX;
+            //    var D = dotproduct(edgeCX,edgeCY,edgeCZ,TriAX,TriAY,TriAZ);
+               
+            // }  
+         }
+
+         if(isSphere>0) {
+            var lambertAmount = 0;
+            var objlambert = Objects[isSphere+6];
+            var objspec = Objects[isSphere+5];
+            var sphereX = 2*(Objects[isSphere+9]/width)-1;
+            var sphereY = scale*((1-(2*Objects[isSphere+10]))/height);
+            var sphereZ = Objects[isSphere+11];
+            var pointX = tmin*unitDX;
+            var pointY = tmin*unitDY;
+            var pointZ = tmin*unitDZ;
+            var tmpX = pointX - sphereX;
+            var tmpY = pointY - sphereY;
+            var tmpZ = pointZ - sphereZ;
+            var len1 = Math.sqrt(sqr(tmpX)+sqr(tmpY)+sqr(tmpZ));
+            var normX = tmpX/len1;
+            var normY = tmpY/len1;
+            var normZ = tmpZ/len1;
+            if(objlambert>0) {
+               var id = 1;
+               for(j=0; j<this.constants.LIGHTCOUNT; j++) {
+                  var lightX = 2*(Lights[id]/width)-1;
+                  var lightY = 1-(2*Lights[id+1]/height);
+                  lightY *= scale;
+                  var lightZ = Lights[id+2];
+                  //check if light shines on this point
+                  tmpX = lightX - pointX;
+                  tmpY = lightY - pointY;
+                  tmpZ = lightZ - pointZ;
+                  len1 = Math.sqrt(sqr(tmpX)+sqr(tmpY)+sqr(tmpZ));
+                  var lightRayX = tmpX/len1;
+                  var lightRayY = tmpY/len1;
+                  var lightRayZ = tmpZ/len1;
+                  var contrib = dotproduct(normX,lightRayX,normY,lightRayY,normZ,lightRayZ);
+                  if(contrib>0) lambertAmount += contrib;
+                  if(contrib<0) lambertAmount = 0;
+                  lambertAmount = Math.min(1, lambertAmount);
+                  id = id+6;
+               }
+            }
+            // if(objspec>0) {
+
+            // }
+            var red = Objects[isSphere+2]*lambertAmount*Objects[isSphere+6];
+            var blue = Objects[isSphere+3]*lambertAmount*Objects[isSphere+6];
+            var green = Objects[isSphere+4]*lambertAmount*Objects[isSphere+6];
+            this.color(red,blue,green);
+         }
+         // if(isTriangle>0) {
+
+         // }
+      }, opt);
+
+      
+      return visualise;
+   }
+   
+   var timer = new Date();
+   var start = timer.getTime();
+   var mykernel = doit("gpu");
+   var mycode   = doit("cpu");
+   // mycode(camera,lights,objects,width,height,fovRadians,scale,heightWidthRatio);
+   mykernel(camera,lights,objects,width,height,fovRadians,scale,heightWidthRatio);
+   var canvas = mykernel.getCanvas();
+   document.getElementsByTagName('body')[0].appendChild(canvas);
+   var timer2 = new Date();
+   var stop = timer2.getTime();
+   var timeTaken = stop - start;
+   document.write(timeTaken);
+
+   var orbit = 360;
+   var rotation = 270;
+   var rotation1 = 90;
+   var orbitX = objects[1+9];
+   var orbitZ = objects[1+11];
+   var orbitY = objects[1+10];
+   var f = document.querySelector("#fps");
+   function renderLoop() {
+      f.innerHTML = fps.getFPS();
+      if (selection === 0) {
+          mycode(camera,lights,objects,width,height,fovRadians,scale,heightWidthRatio);
+          var cv = document.getElementsByTagName("canvas")[0];
+          var bdy = cv.parentNode;
+          var newCanvas = mycode.getCanvas();
+          bdy.replaceChild(newCanvas, cv);
+      } else {
+          mykernel(camera,lights,objects,width,height,fovRadians,scale,heightWidthRatio);
+          var cv = document.getElementsByTagName("canvas")[0];
+          var bdy = cv.parentNode;
+          var newCanvas = mykernel.getCanvas();
+          bdy.replaceChild(newCanvas, cv);
+      }
+      lights[1] = orbitX + Math.cos(Math.PI * (rotation)/180)*1500;
+      lights[3] = orbitZ + Math.sin(Math.PI * (rotation)/180)*8;
+      rotation += 0.5;
+      if(rotation>360){
+         rotation = 0;
+      }
+
+      lights[7] = orbitX + Math.cos(Math.PI * (rotation1)/180)*1500;
+      lights[8] = orbitY + Math.sin(Math.PI * (rotation1)/180)*8;
+      rotation1 += 1;
+      if(rotation1>360){
+         rotation1 = 0;
+      }      
+
+      objects[23] = orbitX + Math.cos(Math.PI * (orbit)/180)*3000;
+      objects[25] = orbitZ + Math.sin(Math.PI * (orbit)/180)*8;
+      orbit -= 1;
+      if(orbit<0) {
+         orbit = 360;
+      }
+
+     // setTimeout(renderLoop,1);            // Uncomment this line, and comment the next line
+      requestAnimationFrame(renderLoop);     // to see how fast this could run...
+   }
+   window.onload = renderLoop;
+
+</script>
+
+</body>
+</html>
